@@ -1,0 +1,268 @@
+# ZeroClaw 完整部署教程
+
+## 一、环境准备
+
+### 系统要求
+- **操作系统**: Linux (Ubuntu/Debian/CentOS)
+- **内存**: 1GB+ (构建时需要，运行时 <5MB)
+- **CPU**: 任意
+- **磁盘**: 5GB+
+
+### 安装依赖
+```bash
+apt-get update
+apt-get install -y curl git build-essential
+```
+
+---
+
+## 二、安装 Rust
+
+```bash
+# 下载并安装 Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 加载环境变量
+source $HOME/.cargo/env
+
+# 验证安装
+rustc --version
+cargo --version
+```
+
+---
+
+## 三、构建 ZeroClaw
+
+```bash
+# 克隆项目
+git clone https://github.com/zeroclaw-labs/zeroclaw.git
+cd zeroclaw
+
+# 构建（内存 < 2GB 时使用单线程）
+cargo build --release
+# 或
+CARGO_BUILD_JOBS=1 cargo build --release
+
+# 验证
+./target/release/zeroclaw --version
+```
+
+---
+
+## 四、配置 AI Provider
+
+### 创建配置目录和文件
+```bash
+mkdir -p ~/.zeroclaw
+
+cat > ~/.zeroclaw/config.toml << 'EOF'
+api_key = "你的API-Key"
+default_provider = "anthropic-custom:https://api.minimax.io/anthropic"
+default_model = "MiniMax-M2.5"
+default_temperature = 0.7
+
+[observability]
+backend = "none"
+
+[autonomy]
+level = "supervised"
+workspace_only = true
+allowed_commands = ["git", "npm", "cargo", "ls", "cat", "grep", "find", "echo", "pwd", "wc", "head", "tail"]
+forbidden_paths = ["/etc", "/root", "/proc", "/sys", "~/.ssh", "~/.gnupg", "~/.aws"]
+
+[runtime]
+kind = "native"
+
+[memory]
+backend = "sqlite"
+auto_save = true
+
+[gateway]
+port = 8080
+host = "0.0.0.0"
+require_pairing = false
+allow_public_bind = true
+
+[channels_config]
+cli = true
+
+[channels_config.telegram]
+enabled = true
+bot_token = "你的BotToken"
+allowed_users = ["*"]
+
+[secrets]
+encrypt = true
+EOF
+```
+
+---
+
+## 五、配置 Cloudflare Tunnel（解决 IPv6 问题）
+
+### 1. 安装 cloudflared
+```bash
+curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+dpkg -i cloudflared.deb
+```
+
+### 2. 登录并创建隧道
+```bash
+cloudflared tunnel login
+cloudflared tunnel create zeroclaw
+```
+
+### 3. 配置 DNS 路由
+```bash
+cloudflared tunnel route dns zeroclaw zeroclaw.your-domain.com
+```
+
+### 4. 后台运行隧道
+```bash
+nohup cloudflared tunnel run zeroclaw > /var/log/cloudflared.log 2>&1 &
+```
+
+---
+
+## 六、启动 ZeroClaw
+
+### 使用 Daemon 模式（推荐，支持 Telegram）
+```bash
+nohup ~/zeroclaw/target/release/zeroclaw daemon > /tmp/zeroclaw.log 2>&1 &
+```
+
+### 验证运行状态
+```bash
+~/zeroclaw/target/release/zeroclaw status
+curl http://localhost:8080/health
+```
+
+---
+
+## 七、配置 Telegram Bot
+
+### 1. 创建 Bot
+- 在 Telegram 搜索 `@BotFather`
+- 发送 `/newbot`
+- 保存 Bot Token
+
+### 2. 更新配置文件
+```bash
+nano ~/.zeroclaw/config.toml
+```
+修改 `[channels_config.telegram]` 部分的 `bot_token`
+
+### 3. 重启 ZeroClaw
+```bash
+kill $(pgrep zeroclaw)
+sleep 2
+nohup ~/zeroclaw/target/release/zeroclaw daemon > /tmp/zeroclaw.log 2>&1 &
+```
+
+### 4. 设置 Webhook
+```bash
+curl -X POST "https://api.telegram.org/bot你的BotToken/setWebhook" \
+  -d "url=https://zeroclaw.dashen.edu.kg/webhook"
+```
+
+### 5. 验证 Webhook
+```bash
+curl "https://api.telegram.org/bot你的BotToken/getWebhookInfo"
+```
+
+### 6. 测试
+在 Telegram 搜索你的 Bot，发送消息测试！
+
+---
+
+## 八、常见问题
+
+### 1. 构建错误：缺少 C 编译器
+```bash
+apt-get install -y build-essential
+```
+
+### 2. 内存不足
+```bash
+CARGO_BUILD_JOBS=1 cargo build --release
+```
+
+### 3. 端口被占用
+```bash
+kill $(lsof -t -i :8080)
+```
+
+### 4. Token 401 错误
+- 检查 Token 大小写
+- 重新创建 Bot
+
+### 5. Webhook JSON 解析错误
+- 使用 `daemon` 模式而非 `gateway` 模式
+- 确保 `require_pairing = false`
+
+---
+
+## 九、后台持久化运行
+
+### 使用 systemd（开机自启）
+
+**cloudflared 服务**
+```bash
+cat > /etc/systemd/system/cloudflared.service << 'EOF'
+[Unit]
+Description=Cloudflare Tunnel
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/cloudflared tunnel run zeroclaw
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable cloudflared
+systemctl start cloudflared
+```
+
+**zeroclaw 服务**
+```bash
+cat > /etc/systemd/system/zeroclaw.service << 'EOF'
+[Unit]
+Description=ZeroClaw AI Assistant
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/zeroclaw
+ExecStart=/root/zeroclaw/target/release/zeroclaw daemon
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable zeroclaw
+systemctl start zeroclaw
+```
+
+---
+
+## 十、使用方式
+
+| 方式 | 命令 |
+|-----|------|
+| SSH 交互 | `~/zeroclaw/target/release/zeroclaw agent` |
+| 单条消息 | `~/zeroclaw/target/release/zeroclaw agent -m "你好"` |
+| Telegram | 搜索 Bot 发送消息 |
+| Web API | `https://your-domain.com/health` |
+
+---
+
+恭喜！🎉 你的 ZeroClaw 现在已经完全部署成功，可以通过 Telegram 随时随地使用了！
