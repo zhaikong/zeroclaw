@@ -1,6 +1,9 @@
 # ZeroClaw Bridge — socket server for GPIO control from ZeroClaw agent
 # SPDX-License-Identifier: MPL-2.0
 
+import utils.http_session
+import utils.transport
+import utils.session
 import socket
 import threading
 from arduino.app_utils import App, Bridge
